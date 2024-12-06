@@ -50,7 +50,8 @@ const CollateralManagerApp = () => {
   const [collateralBalance, setCollateralBalance] = useState("0");
   const [collateralBalanceUSD, setCollateralBalanceUSD] = useState("0");
   const [sscBalance, setSscBalance] = useState("0");
-  const tokenAddress = "0x0B306BF915C4d645ff596e518fAf3F9669b97016";
+  const [healthFactor, sethealthFactor] = useState("1");
+  const tokenAddress = "0x36C02dA8a0983159322a80FFE9F24b1acfF8B570"; //wethMockAddress
 
   // Get Account Information
   const getAccountInfo = async (cmContract, userAddress) => {
@@ -74,6 +75,12 @@ const CollateralManagerApp = () => {
       // get SSC amount
       const sscBalance = await cmContract.getAccountMintedSSC(userAddress);
       setSscBalance(ethers.utils.formatEther(sscBalance));
+
+      const healthFactor = await cmContract.calculateHealthFactor(
+        userAddress,
+        tokenAddress
+      );
+      sethealthFactor(ethers.utils.formatEther(healthFactor));
     } catch (error) {
       console.error("Error fetching account info:", error);
     }
@@ -96,12 +103,16 @@ const CollateralManagerApp = () => {
       const signer = provider.getSigner();
       const account = await signer.getAddress();
       //console.log("User address:", account);
+      const deployedCollateralManagerAddress =
+        "0x4c5859f0F772848b2D91F1D83E2Fe57935348029";
+      const sscAddress = "0x809d550fca64d94Bd9F66E60752A544199cfAC3D";
+
       setProvider(provider);
       setSigner(signer);
       setAccount(account);
       setCmContract(
         new ethers.Contract(
-          "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE",
+          deployedCollateralManagerAddress,
           CollateralManagerABI,
           signer
         )
@@ -109,7 +120,7 @@ const CollateralManagerApp = () => {
 
       try {
         const cm = new ethers.Contract(
-          "0x9A9f2CCfdE556A7E9Ff0848998Aa4a0CFD8863AE", // Address of deployed contract
+          deployedCollateralManagerAddress, // Address of deployed contract
           CollateralManagerABI,
           signer
         );
@@ -120,11 +131,7 @@ const CollateralManagerApp = () => {
       }
 
       const ssc = setSscContract(
-        new ethers.Contract(
-          "0x959922bE3CAee4b8Cd9a407cc3ac1C251C2007B1",
-          SimpleStableCoinABI,
-          signer
-        )
+        new ethers.Contract(sscAddress, SimpleStableCoinABI, signer)
       );
 
       setSscContract(ssc);
@@ -139,25 +146,44 @@ const CollateralManagerApp = () => {
       // test cmContract
       getAccountInfo(cmContract, account);
     }
-  }, [cmContract]); // monitor if  cmContract changed
+  }, [cmContract, account]); // monitor if  cmContract changed
 
   const handleApprove = async () => {
+    /*
+    try { //for anvil debugging, since the tx jam, have to send empty tx to add block number for letting jammed block confirmed
+      setLoading(true);
+      const tx = {
+        from: account,
+        to: account,
+        value: ethers.utils.parseEther("0"),
+        nonce: await provider.getTransactionCount(account, "latest"),
+        gasPrice: await provider.getGasPrice(),
+        gasLimit: ethers.utils.hexlify(21000),
+      };
+      // 发送一个无效交易（覆盖之前的交易）
+      await signer.sendTransaction(tx);
+    } catch (error) {
+      console.error("Approval failed:", error);
+    } finally {
+      setLoading(false);
+    }*/
+
     try {
       setLoading(true);
       const tokenContract = new ethers.Contract(tokenAddress, tokenABI, signer);
+      const amountToMint = ethers.utils.parseEther("1000");
+
+      const txMint = await tokenContract.mint(account, amountToMint);
+      await txMint.wait();
+      console.log("Minting successful");
 
       const tx = await tokenContract.approve(
         cmContract.address,
-        ethers.utils.parseEther("1000") // Approve 1000 ETH (or token)
+        amountToMint // Approve 1000 ETH (or token)
       );
 
       await tx.wait(); // Wait for transaction confirmation
       console.log("Approval successful");
-
-      const amountToMint = ethers.utils.parseEther("1000"); //
-      const txMint = await tokenContract.mint(account, amountToMint); //
-      await txMint.wait(); //
-      console.log("Minting successful");
     } catch (error) {
       console.error("Approval failed:", error);
     } finally {
@@ -169,7 +195,7 @@ const CollateralManagerApp = () => {
     // Your deposit function here
     try {
       await cmContract.depositCollateral(
-        "0x0B306BF915C4d645ff596e518fAf3F9669b97016",
+        tokenAddress,
         ethers.utils.parseEther(collateralAmount),
         {
           gasLimit: ethers.utils.hexlify(100000), // set gas limit because of errors
@@ -183,9 +209,44 @@ const CollateralManagerApp = () => {
   };
 
   const handleMintSSC = async () => {
-    // Your mint SSC function here
-    await cmContract.mintSsc(ethers.utils.parseEther(sscAmountToMint));
-    await getAccountInfo(cmContract, account);
+    //await cmContract.mintSsc(ethers.utils.parseEther(sscAmountToMint));
+    //await getAccountInfo(cmContract, account);
+
+    const gasLimit = ethers.BigNumber.from("1000000"); // 设置一个较高的 gasLimit
+    try {
+      const tx = await cmContract.mintSsc(
+        ethers.utils.parseEther(sscAmountToMint),
+        {
+          gasLimit,
+        }
+      );
+      await tx.wait(); // Wait for finishing transacation
+      await getAccountInfo(cmContract, account);
+    } catch (error) {
+      console.error("Error during mint:", error);
+      parseRevertError(error);
+    }
+  };
+
+  const parseRevertError = (error) => {
+    if (error.data) {
+      try {
+        // 定义自定义错误的 ABI
+        const iface = new ethers.utils.Interface([
+          "error CM__BreakHealthFactor()",
+        ]);
+
+        // 解析错误数据
+        const decodedError = iface.parseError(error.data);
+        console.error("Custom Error Decoded:", decodedError);
+        alert("Transaction failed: CM__BreakHealthFactor triggered.");
+      } catch (parseError) {
+        console.error("Failed to parse custom error:", parseError);
+      }
+    } else {
+      console.error("Unknown error:", error);
+      alert("An unknown error occurred.");
+    }
   };
 
   const handleRedeem = async () => {
@@ -201,7 +262,7 @@ const CollateralManagerApp = () => {
   const handleLiquidate = async () => {
     // Your liquidate function here
     await cmContract.liquidate(
-      "0x0B306BF915C4d645ff596e518fAf3F9669b97016",
+      tokenAddress,
       account,
       ethers.utils.parseEther(debtToCover)
     );
@@ -224,6 +285,7 @@ const CollateralManagerApp = () => {
         <h3>Collateral Balance: {collateralBalance} ETH</h3>
         <h3>Collateral Balance in USD: ${collateralBalanceUSD}</h3>
         <h3>SSC Balance: {sscBalance} SSC</h3>
+        <h3>Health Factor: {healthFactor} </h3>
         <Button variant="contained" color="primary" onClick={handleRefresh}>
           Refresh
         </Button>
